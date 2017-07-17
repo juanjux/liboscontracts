@@ -19,26 +19,11 @@ pragma solidity^0.4.8;
 // TODO refinancing (increase in leftPayments, change in amount). Must be signed
 // by 4/5 of all lenders and the solicitor.
 
-// TODO check if Lender can be a separate Contract with methods
+// TODO move LendRequest to its own Contract and InProgressLend members to
+// main.
 
-// TODO denying mechanism
-
-// TODO check if there is something like a "periodic" execution in Solidity
-
-// TODO support total and partial cancelations with reduced interest in proportion
-// to (amountReturned - amountRequested), the amount left, and the time left. 
-
-// TODO iterate over lenders to know what ones to retire when the lending starts:
-// https://ethereum.stackexchange.com/questions/12145/how-to-loop-through-mapping-in-solidity
-
-// TODO: add a log of repayments (or a way to retrieve it from the blockchain)
-
-// XXX FIXME review the totalAmountLocked / totalAmountApproved logic:
-// this.amount already is "totalAmountLocked" so it meaning should turn into
-// totalAmountLocked
-
-
-// XXX FIXME msg.sender.send can fail 
+// TODO: amount-default (solicitor sent less money than required by
+// amountRequested / numPayments)
 
 contract Lend {
     // ~~~~~~~~~~~~~ constants  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -57,6 +42,7 @@ contract Lend {
         uint32 numPayments;
         // Time between payments
         uint64 secondsBetweenPayments;
+        uint increasePerDayOfDelay;
 
         string purpose;
 
@@ -70,10 +56,8 @@ contract Lend {
 
     struct InProgressLend {
         uint pendingAmount;
-        //uint leftPayments; => TODO calculated from pendingAmount/amountPerPayment
         uint amountPerPayment;
         uint64 lastPaymentTstamp;
-        uint64 nextPaymentTstamp;
         uint64 secondsBetweenPayments;
 
         // If the solicitor delays a payment or sent less than the expected
@@ -85,7 +69,9 @@ contract Lend {
         // If the solicitor sends part or a total of the pending amount (with
         // or without the increased interest) it will not change the last/next
         // payment dates.
-        uint paymentDefaultInterestPerHour; }
+        uint increasePerDayOfDelay;
+        uint totalDefaultsIncrease;
+    }
 
     // When a lender approves the lend, the amountLended goes from this.totalLocked
     // to this.totalApproved. When totalApproved >= LendRequest.amount, the Lend is approved
@@ -117,14 +103,16 @@ contract Lend {
     event LogLenderRetiredAmount(address lenderAddress, uint _amount);
     event LogLenderRetire(address lenderAddress);
     event LogLendActivated(address _solicitor, uint _amount);
-
+    event LogLendPayment(address _solicitor, uint _amount);
+    event LogLenderReceivedPayment(address lender, uint _amount);
+    event LogLendPaid();
 
     // ~~~~~~~~~~~~~ methods ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
     // Constructor
     function Lend(uint amountRequested, uint amountReturned, uint32 numPayments, 
                   uint64 secondsBetweenPayments, string purpose) {
-        require(msg.amount == 0);
+        require(msg.value == 0);
         require(status == LendStatus.Requested);
         require(amountRequested > 0);
         require(amountReturned > 0);
@@ -160,11 +148,10 @@ contract Lend {
 
         // Must be already a lender:
         require(l.address != address(0x0));
-
         // Can't add funds to an InProgress, Denied or Finished lend:
         require(status == LendStatus.Requested);
         // Can't add once the lender has approved the request
-        require(!(lenders[msg.sender].approved));
+        require(!lenders[msg.sender].approved);
 
         l.amount += msg.value;
         LogLenderAddedAmount(msg.sender, msg.value);
@@ -179,13 +166,17 @@ contract Lend {
         // Can't add funds to an InProgress, Denied or Finished lend:
         require(status == LendStatus.Requested);
         // Can't retire funds if the lender has approved the request
-        require(!(l.approved));
+        require(!l.approved);
+        require(_amount <= l.amount)
         // Can't retire all the funds (that's what lenderRetire is for, not 
         // calling it automatically to avoid accidental retirements)
         require(msg.value > l._amount);
 
         l.amount -= _amount;
-        msg.sender.send(_amount);
+        if (!msg.sender.send(_amount)) {
+            l.amount += _amount;
+            throw;
+        }
         LogLenderRetiredAmount(msg.sender, _amount);
         return l.amount;
     }
@@ -198,11 +189,14 @@ contract Lend {
         // approve the lend are automatically retired when the lending starts)
         require(status != LendStatus.Requested);
 
+        if (!msg.sender.send(l._amount)) {
+           throw;
+        }
+
         if (l.approved) {
             l.approved = false;
             lendRequest.totalAmountLocked -= l._amount;
         }
-        msg.sender.send(l._amount);
 
         // TEST: test that this really works
         for (uint i = 0; i < lenderAddrs.length; i++) {
@@ -214,7 +208,9 @@ contract Lend {
         LogLenderRetire(msg.sender);
     }
 
-    function activateLend() {
+    function lendActivate() private {
+        require(status == LendStatus.Requested);
+
         // Remove lenders that didn't approve
         for (uint i = 0; i < lendersAddrs.length; i++) {
             if (!lenders[lendersAddrs[i]].approved) {
@@ -225,35 +221,91 @@ contract Lend {
         status = LendStatus.InProgress;
         solicitor.send(this.amount);
         lendRequest.totalAmountLocked = 0;
-        this.totalAmountLocked = 0;
         LogLendActivated(address _solicitor, this.amount);
     }
 
     function lenderApprove() {
+        require(status == LendStatus.Requested);
+
         Lender l = lenders[msg.sender];
 
         require(l.address != address(0x0));
-        require(!(l.approved));
+        require(!l.approved);
 
         l.approved = true;
         uint neededToStart = lendRequest.amountRequested - lendRequest.totalAmountLocked;
-
         if (l._amount >= neededToStart) {
             // Return the entra money
             uint extra = l._amount - neededToStart;
-            l._amount -= extra;
-            msg.sender.send(extra);
+            if (extra) {
+                l._amount -= extra;
+                if (!msg.sender.send(extra)) {
+                    l._amount += extra;
+                    l.approved = false;
+                    throw;
+                }
+            }
             // Go!
-            activateLend();
+            lendActivate();
         } else {
             // Still not enough to start
-            this.totalAmountLocked += l._amount;
+            lendRequest.totalAmountLocked += l._amount;
         }
     }
 
-    // TODO:
-    // receivePayment() (check for defaulted payment dates, send money to lenders in 
-    // proportion to the amount provided).
-    // lendPaid()  (change status, remove lenders, finish/delete contract).
-    // refinance() (change amountPerPayment, must be signed by everybody)
+    function lendPaid() private {
+        require(status == LendStatus.InProgress);
+
+        status = LendStatus.Paid;
+        LogLendPaid();
+    }
+
+    function lendersReceivePayment(uint _amount) {
+        for (uint i = 0; i < lenderAddrs.length; i++) {
+            Lender l = lenderAddrs[i];
+
+            uint part = _amount * (l._amount / amountRequested);
+            l.lender.send(part);
+            LogLenderReceivedPayment(l.lender, part);
+        }
+    }
+
+    function receivePayment() public {
+        require(status == LendStatus.InProgress);
+        require(msg.sender == solicitor);
+
+        // Check if there is a delay-default
+        uint currentTStamp = block.timestamp;
+        uint secsSinceLastPayment = currentTStamp - inProgressLend.lastPaymentTstamp;
+        if (secsSinceLastPayment > secondsBetweenPayments) {
+            // there is: increase the pending amount
+            delay = secsSinceLastPayment - secondsBetweenPayments;
+            increase = (delay / 3600) * increasePerDayOfDelay;
+            pendingAmount += increase;
+            totalDefaultsIncrease += increase;
+        }
+
+        LogLendPayment(msg.sender, msg.value);
+
+        if (msg.value > pendingAmount) {
+            // Lend is fully paid, return any excess to the sender
+            uint excess = msg.value - pendingAmount;
+            pendingAmount = 0;
+            if(excess) {
+                if (!msg.sender.send(excess)) {
+                    throw;                   
+                }
+            }
+            lendPaid();
+        }
+
+        pendingAmount -= msg.value;
+        inProgressLend.lastPaymentTstamp = currentTStamp;
+        lendersReceivePayment(msg.value);
+    }
+
+    // Fallback function
+    function () {
+        throw;
+    }
 }
