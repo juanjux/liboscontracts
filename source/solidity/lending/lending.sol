@@ -40,24 +40,6 @@ contract Lend {
     uint constant minSecondsBetweenPayments = 1 * secondsPerDay;
     // ~~~~~~~~~~~~~ data types ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    // LendReporters investigate LendRequests (Solicitor finances, collaterals,
-    // etc). It doesn't neccesarily be a lender; it could be another user.
-    struct LendReporter {
-        address reporter;
-        LendRequestReport[] reports;
-    }
-
-    enum ReportStatus = {InProgress, Finished}
-    // A report done by a LendReporter. It could have a price attached.
-    struct LendRequestReport {
-        LendReporter reporter;
-        // Free text of the report, written by the reporter
-        string reportText;
-        // 0 to 100 (100 is better)
-        uint8 lendQualification;
-        ReportStatus status;
-    }
-
     // This is a request for a lend. It can be browsed by any potential Lender.
     struct LendRequest {
         // The requested amount that the solicitor would inmediately get from the lenders
@@ -71,7 +53,6 @@ contract Lend {
         uint64 secondsBetweenPayments;
 
         string purpose;
-        mapping (address => LendRequestReport) lendReports;
 
         // TODO: property: Amount locked but still not aproved by the lenders
         //uint totalAmountLocked;
@@ -117,8 +98,9 @@ contract Lend {
 
     address public solicitor
     mapping (address => Lender) lenders;
-    // XXX sync
-    address[] lendersAddrs; // because you can't really iterate a map in Solidity...
+    // because you can't really iterate a map in Solidity we need this 
+    // (iterable, yay!) list with the same addresses.
+    address[] lendersAddrs;
 
     // This is initially filled. Once enough lenders have signed and the status has 
     // changed to InProgress, the lendRequest will be converted into the approvedLend.
@@ -128,8 +110,16 @@ contract Lend {
     enum LendStatus = {Requested, Denied, InProgress, Paid}
     LendStatus status = LendStatus.Requested;
 
-    // ~~~~~~~~~~~~~ function members ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    event LogLenderNew(address lenderAddress);
+    event LogLenderAddedAmount(address lenderAddress, uint _amount);
+    event LogLenderRetiredAmount(address lenderAddress, uint _amount);
+    event LogLenderRetire(address lenderAddress);
+    event LogLendActivated(address _solicitor, uint _amount);
 
+
+    // ~~~~~~~~~~~~~ methods ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    // Constructor
     function Lend(uint amountRequested, uint amountReturned, uint32 numPayments, 
                   uint64 secondsBetweenPayments, string purpose) {
         require(msg.amount == 0);
@@ -149,7 +139,7 @@ contract Lend {
         lendRequest.purpose = purpose;
     }
 
-    function lenderJoin() {
+    function lenderJoin() public {
         require(status == LendStatus.Requested);
         require(lenders[msg.sender] == address(0x0));
 
@@ -161,9 +151,10 @@ contract Lend {
         lendRequest.totalAmountLocked += msg.value;
         lenders[msg.sender] = l;
         lendersAddrs.push(l);
+        LogLenderNew(msg.sender);
     }
 
-    function lenderAddAmount() {
+    function lenderAddAmount() public returns(uint) {
         Lender l = lenders[msg.sender];
 
         // Must be already a lender:
@@ -176,9 +167,11 @@ contract Lend {
 
         l.amount += msg.value;
         lendRequest.totalAmountLocked += msg.value;
+        LogLenderAddedAmount(msg.sender, msg.value);
+        return l.amount;
     }
 
-    function lenderRetireAmount(uint _amount) {
+    function lenderRetireAmount(uint _amount) public returns (uint){
         Lender l = lenders[msg.sender];
 
         // Must be already a lender:
@@ -194,23 +187,31 @@ contract Lend {
         lendRequest.totalAmountLocked -= _amount;
         l.amount -= _amount;
         msg.sender.send(_amount);
+        LogLenderRetiredAmount(msg.sender, _amount);
+        return l.amount;
     }
 
-    function lenderRetire() {
+    function lenderRetire() public {
         Lender l = lenders[msg.sender];
 
         require(l.address != address(0x0));
-        // Can't retire after the lending has been aproved (lenders that
-        // didn't approve the lend are automatically retired when the lending starts)
+        // Can't retire after the lending has been aproved (lenders that didn't
+        // approve the lend are automatically retired when the lending starts)
         require(status != LendStatus.Requested);
         // Can't retire once the lender has approved the request
         require(!(l.approved));
 
         lendRequest.totalAmountLocked -= l._amount;
         msg.sender.send(l._amount);
+
         // TEST: test that this really works
+        for (uint i = 0; i < lenderAddrs.length; i++) {
+            if (lenderAddrs[i] == msg.sender) {
+                delete lenderAddrs[i];
+            }
+        }
         delete lenders[msg.sender];
-        // XXX remove from lendersAddrs too!
+        LogLenderRetire(msg.sender);
     }
 
     function activateLend() {
@@ -223,6 +224,7 @@ contract Lend {
 
         status = LendStatus.InProgress;
         solicitor.send(this.amount);
+        LogLendActivated(address _solicitor, this.amount);
     }
 
     // TODO:
