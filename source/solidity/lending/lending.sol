@@ -109,11 +109,37 @@ contract Lend {
 
     // ~~~~~~~~~~~~~ methods ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+    modifier requireStatus(status, LendStatus required) {
+        if (status != required) 
+            throw;
+        _
+    }
+
+    modifier onlyLenders() {
+        if (lenders[msg.sender] == address(0x0))             
+            throw;
+
+        _
+    }
+
+    modifier onlySolicitor() { 
+        if(msg.sender != solicitor) 
+            throw; 
+        _ 
+    }
+
+    modifier hasNotApproved(Lender l) {
+        if (lenders[msg.sender].approved) {
+            throw;
+        }
+        _
+    }
+
     // Constructor
     function Lend(uint amountRequested, uint amountReturned, uint32 numPayments, 
                   uint64 secondsBetweenPayments, string purpose) {
         require(msg.value == 0);
-        require(status == LendStatus.Requested);
+        requireStatus(LendStatus.Requested);
         require(amountRequested > 0);
         require(amountReturned > 0);
         require(amountReturned >= amountRequested);
@@ -130,7 +156,7 @@ contract Lend {
     }
 
     function lenderJoin() public {
-        require(status == LendStatus.Requested);
+        requireStatus(LendStatus.Requested);
         require(lenders[msg.sender] == address(0x0));
 
         Lender l = Lender({
@@ -144,14 +170,10 @@ contract Lend {
     }
 
     function lenderAddAmount() public returns(uint) {
+        requireStatus(LendStatus.Requested);
+        onlyLenders();
         Lender l = lenders[msg.sender];
-
-        // Must be already a lender:
-        require(l.address != address(0x0));
-        // Can't add funds to an InProgress, Denied or Finished lend:
-        require(status == LendStatus.Requested);
-        // Can't add once the lender has approved the request
-        require(!lenders[msg.sender].approved);
+        hasNotApproved(l);
 
         l.amount += msg.value;
         LogLenderAddedAmount(msg.sender, msg.value);
@@ -159,14 +181,10 @@ contract Lend {
     }
 
     function lenderRetireAmount(uint _amount) public returns (uint){
+        onlyLenders();
+        requireStatus(LendStatus.Requested);
         Lender l = lenders[msg.sender];
 
-        // Must be already a lender:
-        require(l.lender != address(0x0));
-        // Can't add funds to an InProgress, Denied or Finished lend:
-        require(status == LendStatus.Requested);
-        // Can't retire funds if the lender has approved the request
-        require(!l.approved);
         require(_amount <= l.amount)
         // Can't retire all the funds (that's what lenderRetire is for, not 
         // calling it automatically to avoid accidental retirements)
@@ -182,12 +200,10 @@ contract Lend {
     }
 
     function lenderRetire() public {
-        Lender l = lenders[msg.sender];
+        onlyLenders();
+        requireStatus(LendStatus.Requested);
 
-        require(l.address != address(0x0));
-        // Can't retire after the lending has been aproved (lenders that didn't
-        // approve the lend are automatically retired when the lending starts)
-        require(status != LendStatus.Requested);
+        Lender l = lenders[msg.sender];
 
         if (!msg.sender.send(l._amount)) {
            throw;
@@ -209,7 +225,7 @@ contract Lend {
     }
 
     function lendActivate() private {
-        require(status == LendStatus.Requested);
+        requireStatus(LendStatus.Requested);
 
         // Remove lenders that didn't approve
         for (uint i = 0; i < lendersAddrs.length; i++) {
@@ -225,18 +241,19 @@ contract Lend {
     }
 
     function lenderApprove() {
-        require(status == LendStatus.Requested);
+        requireStatus(LendStatus.Requested);
+        onlyLenders();
 
         Lender l = lenders[msg.sender];
-
-        require(l.address != address(0x0));
-        require(!l.approved);
-
+        hasNotApproved(l);
         l.approved = true;
+
         uint neededToStart = lendRequest.amountRequested - lendRequest.totalAmountLocked;
+
         if (l._amount >= neededToStart) {
             // Return the entra money
             uint extra = l._amount - neededToStart;
+
             if (extra) {
                 l._amount -= extra;
                 if (!msg.sender.send(extra)) {
@@ -245,6 +262,7 @@ contract Lend {
                     throw;
                 }
             }
+
             // Go!
             lendActivate();
         } else {
@@ -254,10 +272,11 @@ contract Lend {
     }
 
     function lendPaid() private {
-        require(status == LendStatus.InProgress);
+        requireStatus(LendStatus.InProgress);
 
         status = LendStatus.Paid;
         LogLendPaid();
+        selfdestruct(solicitor);
     }
 
     function lendersReceivePayment(uint _amount) {
@@ -271,8 +290,8 @@ contract Lend {
     }
 
     function receivePayment() public {
-        require(status == LendStatus.InProgress);
-        require(msg.sender == solicitor);
+        requireStatus(LendStatus.InProgress);
+        onlySolicitor();
 
         // Check if there is a delay-default
         uint currentTStamp = block.timestamp;
