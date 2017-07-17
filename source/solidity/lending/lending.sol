@@ -1,6 +1,5 @@
-
 // Lending.sol
-// Copyright (C) 2017  Juanjo Alvarez Martinez
+// Copyright (C) 2017 Juanjo Alvarez Martinez
 
 //This program is free software: you can redistribute it and/or modify
 //it under the terms of the GNU General Public License as published by
@@ -34,6 +33,13 @@ pragma solidity^0.4.8;
 
 // TODO: add a log of repayments (or a way to retrieve it from the blockchain)
 
+// XXX FIXME review the totalAmountLocked / totalAmountApproved logic:
+// this.amount already is "totalAmountLocked" so it meaning should turn into
+// totalAmountLocked
+
+
+// XXX FIXME msg.sender.send can fail 
+
 contract Lend {
     // ~~~~~~~~~~~~~ constants  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     uint constant secondsPerDay = 3600; // TODO: leap seconds? check the time functions...
@@ -54,14 +60,11 @@ contract Lend {
 
         string purpose;
 
-        // TODO: property: Amount locked but still not aproved by the lenders
-        //uint totalAmountLocked;
-
-        // Amount aproved by the lenders. When this is greated than amountRequested
-        // the LendRequest will close and the InProgressLend will start. Then any 
-        // potential lenders with an Lender.approved = false will be returned their
-        // Lender.amount and removed from this.Lenders.
-        uint totalAmountApproved;
+        // Amount aproved by the lenders. When this is greated than
+        // amountRequested the LendRequest will close and the InProgressLend
+        // will start. Then any potential lenders with an Lender.approved =
+        // false will be returned their Lender.amount and removed from
+        // this.Lenders.
         uint totalAmountLocked;
     }
 
@@ -79,11 +82,10 @@ contract Lend {
         // payment amount, not the total, but it will be added to the total and
         // thus leftPayments could be increased). 
 
-        // If the solicitor sends part or a total of the
-        // pending amount (with or without the increased interest) it will not
-        // change the last/next payment dates.
-        uint paymentDefaultInterestPerHour;
-    }
+        // If the solicitor sends part or a total of the pending amount (with
+        // or without the increased interest) it will not change the last/next
+        // payment dates.
+        uint paymentDefaultInterestPerHour; }
 
     // When a lender approves the lend, the amountLended goes from this.totalLocked
     // to this.totalApproved. When totalApproved >= LendRequest.amount, the Lend is approved
@@ -148,7 +150,6 @@ contract Lend {
             _amount  : msg.value,
             approved : false
         });
-        lendRequest.totalAmountLocked += msg.value;
         lenders[msg.sender] = l;
         lendersAddrs.push(l);
         LogLenderNew(msg.sender);
@@ -166,7 +167,6 @@ contract Lend {
         require(!(lenders[msg.sender].approved));
 
         l.amount += msg.value;
-        lendRequest.totalAmountLocked += msg.value;
         LogLenderAddedAmount(msg.sender, msg.value);
         return l.amount;
     }
@@ -184,7 +184,6 @@ contract Lend {
         // calling it automatically to avoid accidental retirements)
         require(msg.value > l._amount);
 
-        lendRequest.totalAmountLocked -= _amount;
         l.amount -= _amount;
         msg.sender.send(_amount);
         LogLenderRetiredAmount(msg.sender, _amount);
@@ -198,10 +197,11 @@ contract Lend {
         // Can't retire after the lending has been aproved (lenders that didn't
         // approve the lend are automatically retired when the lending starts)
         require(status != LendStatus.Requested);
-        // Can't retire once the lender has approved the request
-        require(!(l.approved));
 
-        lendRequest.totalAmountLocked -= l._amount;
+        if (l.approved) {
+            l.approved = false;
+            lendRequest.totalAmountLocked -= l._amount;
+        }
         msg.sender.send(l._amount);
 
         // TEST: test that this really works
@@ -224,13 +224,34 @@ contract Lend {
 
         status = LendStatus.InProgress;
         solicitor.send(this.amount);
+        lendRequest.totalAmountLocked = 0;
+        this.totalAmountLocked = 0;
         LogLendActivated(address _solicitor, this.amount);
     }
 
+    function lenderApprove() {
+        Lender l = lenders[msg.sender];
+
+        require(l.address != address(0x0));
+        require(!(l.approved));
+
+        l.approved = true;
+        uint neededToStart = lendRequest.amountRequested - lendRequest.totalAmountLocked;
+
+        if (l._amount >= neededToStart) {
+            // Return the entra money
+            uint extra = l._amount - neededToStart;
+            l._amount -= extra;
+            msg.sender.send(extra);
+            // Go!
+            activateLend();
+        } else {
+            // Still not enough to start
+            this.totalAmountLocked += l._amount;
+        }
+    }
+
     // TODO:
-    // lenderApprove() (can trigger status change, adds signature)
-    // activateLend() (remove lenders without approval)
-    // lenderDenyLend() (retire and vote for deny)
     // receivePayment() (check for defaulted payment dates, send money to lenders in 
     // proportion to the amount provided).
     // lendPaid()  (change status, remove lenders, finish/delete contract).
